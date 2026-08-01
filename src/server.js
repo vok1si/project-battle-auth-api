@@ -8,6 +8,31 @@ import jwt from "jsonwebtoken";
 import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
 
+const nativeFetch = globalThis.fetch.bind(globalThis);
+
+function isRetryableFetchError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return error instanceof TypeError && (message.includes("fetch failed") || message.includes("network"));
+}
+
+async function resilientFetch(input, init = {}) {
+  const method = String(init?.method || "GET").toUpperCase();
+  const attempts = method === "GET" || method === "HEAD" ? 3 : 1;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await nativeFetch(input, init);
+    } catch (error) {
+      if (attempt === attempts || !isRetryableFetchError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    }
+  }
+
+  throw new Error("Unreachable fetch retry state");
+}
+
+globalThis.fetch = resilientFetch;
+
 const requiredEnv = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -30,7 +55,8 @@ const emailCodeTtlMinutes = Number(process.env.EMAIL_CODE_TTL_MINUTES || 10);
 const minecraftTicketTtlMinutes = Number(process.env.MINECRAFT_TICKET_TTL_MINUTES || 30);
 const externalTimeoutMs = Number(process.env.EXTERNAL_TIMEOUT_MS || 25000);
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { persistSession: false }
+  auth: { persistSession: false },
+  global: { fetch: resilientFetch }
 });
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -236,7 +262,11 @@ async function verifyCode(email, code, purpose) {
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "project-battle-auth-api" });
+  res.json({
+    ok: true,
+    service: "project-battle-auth-api",
+    revision: "2026-08-01-fetch-retry"
+  });
 });
 
 app.post("/auth/start-register", async (req, res, next) => {
@@ -576,11 +606,14 @@ app.post("/auth/minecraft/verify", async (req, res, next) => {
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  const status = Number(error.status || 500);
-  const detail = error?.message || error?.details || error?.hint || error?.code;
+  const upstreamFetchFailed = isRetryableFetchError(error);
+  const status = Number(error.status || (upstreamFetchFailed ? 502 : 500));
+  const detail = upstreamFetchFailed
+    ? "Temporary upstream connection error. Please try again."
+    : error?.message || error?.details || error?.hint || error?.code;
   res.status(status).json({
     ok: false,
-    code: error.code || "INTERNAL_ERROR",
+    code: error.code || (upstreamFetchFailed ? "UPSTREAM_FETCH_FAILED" : "INTERNAL_ERROR"),
     message: detail || "Internal server error"
   });
 });
