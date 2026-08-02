@@ -223,3 +223,25 @@ Returns:
 - The launcher only receives the player session token.
 - The Minecraft server mod should keep `MINECRAFT_SERVER_SECRET` only on the server.
 - Because the Minecraft server is offline-mode, the server-side auth mod is required. Without it, players can spoof nicknames.
+
+## 7. Telegram Bot
+
+The Telegram bot is built into this API. It provides support tickets, FAQ, rules, linked-account profiles, and password reset confirmed through the account email.
+
+1. In Telegram, open `@BotFather` and send `/newbot`.
+2. Choose a display name, then a unique username ending in `bot` (for example `ProjectBattleSupportBot`).
+3. Copy the token BotFather sends. It is a secret: never put it in GitHub or the launcher.
+4. In Render, add these environment variables:
+
+```env
+PUBLIC_BASE_URL=https://your-existing-auth-service.onrender.com
+TELEGRAM_BOT_TOKEN=token_from_botfather
+TELEGRAM_WEBHOOK_SECRET=a_long_random_value
+TELEGRAM_ADMIN_CHAT_IDS=your_telegram_numeric_chat_id
+```
+
+5. Run `sql/upgrade-0.2.0-telegram.sql` once in the Supabase SQL Editor and redeploy.
+
+On startup the API registers `https://your-existing-auth-service.onrender.com/telegram/webhook` automatically. Telegram will then expose the bot at `https://t.me/your_bot_username`.
+
+The launcher should call `POST /auth/telegram/link-code` with the existing account token. It returns a one-time link such as `https://t.me/your_bot_username?start=link_AB12CD34`; opening it links the player's Telegram profile without asking for their launcher password.

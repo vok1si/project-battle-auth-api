@@ -7,6 +7,7 @@ import helmet from "helmet";
 import jwt from "jsonwebtoken";
 import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
+import { ProjectBattleTelegramBot } from "./telegram-bot.js";
 
 const nativeFetch = globalThis.fetch.bind(globalThis);
 
@@ -54,6 +55,9 @@ const sessionDays = Number(process.env.SESSION_DAYS || 14);
 const emailCodeTtlMinutes = Number(process.env.EMAIL_CODE_TTL_MINUTES || 10);
 const minecraftTicketTtlMinutes = Number(process.env.MINECRAFT_TICKET_TTL_MINUTES || 30);
 const externalTimeoutMs = Number(process.env.EXTERNAL_TIMEOUT_MS || 25000);
+const telegramBotToken = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
+const telegramWebhookSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || "").trim();
+const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
   global: { fetch: resilientFetch }
@@ -165,6 +169,22 @@ async function sendEmailCode(email, code, purpose) {
   }
 }
 
+function telegramText(name, fallback) {
+  return String(process.env[name] || fallback).replaceAll("\\n", "\n");
+}
+
+const telegramBot = telegramBotToken
+  ? new ProjectBattleTelegramBot({
+      token: telegramBotToken,
+      supabase,
+      sendEmailCode,
+      adminChatIds: String(process.env.TELEGRAM_ADMIN_CHAT_IDS || "").split(",").map((id) => id.trim()).filter(Boolean),
+      faqText: telegramText("TELEGRAM_FAQ_TEXT", "<b>FAQ Project Battle</b>\n\n• Убедитесь, что используете актуальную версию лаунчера.\n• Для входа на ETS нужен аккаунт Project Battle.\n• Если ошибка повторяется — создайте заявку в разделе «Поддержка» и приложите описание."),
+      rulesText: telegramText("TELEGRAM_RULES_TEXT", "<b>Правила Project Battle</b>\n\n1. Уважайте игроков и команду проекта.\n2. Не используйте читы, эксплойты и сторонние преимущества.\n3. Не передавайте аккаунт другим людям.\n4. Не публикуйте личные данные и коды подтверждения."),
+      supportEmail: process.env.SUPPORT_EMAIL || "ourffers@gmail.com"
+    })
+  : null;
+
 app.get("/debug/config", (_req, res) => {
   res.json({
     ok: true,
@@ -265,8 +285,54 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "project-battle-auth-api",
-    revision: "2026-08-01-fetch-retry"
+    revision: "2026-08-01-fetch-retry",
+    telegramBot: Boolean(telegramBot)
   });
+});
+
+app.post("/auth/telegram/link-code", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req);
+    if (!user?.email_verified || !user.nickname) {
+      sendError(res, 401, "INVALID_TOKEN", "Valid Project Battle account required");
+      return;
+    }
+    if (!telegramBot) {
+      sendError(res, 503, "TELEGRAM_NOT_CONFIGURED", "Telegram bot is not configured yet");
+      return;
+    }
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const code = Array.from({ length: 8 }, () => alphabet[crypto.randomInt(alphabet.length)]).join("");
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const { error } = await withTimeout(supabase.from("pb_telegram_link_codes").insert({
+      user_id: user.id,
+      code_hash: sha256(code),
+      expires_at: expiresAt
+    }), "Database Telegram link code insert");
+    if (error) throw error;
+    const identity = await telegramBot.api("getMe", {});
+    const link = identity?.username ? `https://t.me/${identity.username}?start=link_${code}` : null;
+    res.json({ ok: true, code, expiresAt, link });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/telegram/webhook", async (req, res, next) => {
+  try {
+    if (!telegramBot) {
+      sendError(res, 404, "NOT_FOUND", "Telegram bot is not configured");
+      return;
+    }
+    if (!telegramWebhookSecret || req.get("x-telegram-bot-api-secret-token") !== telegramWebhookSecret) {
+      sendError(res, 403, "BAD_TELEGRAM_SECRET", "Bad Telegram webhook secret");
+      return;
+    }
+    await telegramBot.handleUpdate(req.body);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post("/auth/start-register", async (req, res, next) => {
@@ -631,4 +697,28 @@ app.listen(port, () => {
       }
     })
     .catch((error) => console.error("Supabase startup check failed:", error));
+
+  if (telegramBot && publicBaseUrl && telegramWebhookSecret) {
+    Promise.all([
+      telegramBot.api("setWebhook", {
+        url: `${publicBaseUrl}/telegram/webhook`,
+        secret_token: telegramWebhookSecret,
+        allowed_updates: ["message"],
+        drop_pending_updates: false
+      }),
+      telegramBot.api("setMyCommands", {
+        commands: [
+          { command: "start", description: "Открыть меню Project Battle" },
+          { command: "menu", description: "Открыть главное меню" },
+          { command: "myid", description: "Показать мой Telegram ID" }
+        ]
+      })
+    ])
+      .then(() => console.log("Telegram bot webhook configured."))
+      .catch((error) => console.error("Telegram bot webhook setup failed:", error));
+  } else if (!telegramBot) {
+    console.log("Telegram bot disabled: TELEGRAM_BOT_TOKEN is not set.");
+  } else {
+    console.log("Telegram bot disabled: PUBLIC_BASE_URL or TELEGRAM_WEBHOOK_SECRET is not set.");
+  }
 });
