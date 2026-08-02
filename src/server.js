@@ -577,7 +577,20 @@ app.get("/auth/me", async (req, res, next) => {
       return;
     }
 
-    res.json({ ok: true, user: publicUser(user) });
+    const { data: telegramLinks, error: telegramLinkError } = await withTimeout(supabase
+      .from("pb_telegram_links")
+      .select("telegram_user_id")
+      .eq("user_id", user.id)
+      .limit(1), "Database Telegram link status");
+    if (telegramLinkError) throw telegramLinkError;
+
+    res.json({
+      ok: true,
+      user: {
+        ...publicUser(user),
+        telegramLinked: Boolean(telegramLinks?.length)
+      }
+    });
   } catch (error) {
     next(error);
   }
