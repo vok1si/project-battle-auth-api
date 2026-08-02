@@ -129,9 +129,55 @@ export class ProjectBattleTelegramBot {
     const account = user ? `${user.nickname} (${maskEmail(user.email)})` : "не привязан";
     for (const adminChatId of this.adminChatIds) {
       await this.send(adminChatId,
-        `<b>Новая заявка #${shortId}</b>\nКатегория: ${escapeHtml(category)}\nАккаунт: ${escapeHtml(account)}\nTelegram: ${escapeHtml(telegramUser.username ? `@${telegramUser.username}` : telegramUser.id)}\n\n${escapeHtml(message)}`
+        `<b>Новая заявка #${shortId}</b>\nКатегория: ${escapeHtml(category)}\nАккаунт: ${escapeHtml(account)}\nTelegram: ${escapeHtml(telegramUser.username ? `@${telegramUser.username}` : telegramUser.id)}\n\n${escapeHtml(message)}\n\n<i>Ответить:</i> <code>/reply ${shortId} текст</code>\n<i>Закрыть:</i> <code>/close ${shortId}</code>`
       );
     }
+  }
+
+  isAdmin(telegramUserId) {
+    return this.adminChatIds.includes(String(telegramUserId));
+  }
+
+  async findTicketByShortId(shortId) {
+    const { data, error } = await this.supabase
+      .from("pb_support_tickets")
+      .select("id, telegram_user_id, status")
+      .order("created_at", { ascending: false })
+      .limit(500);
+    if (error) throw error;
+    return (data || []).find((ticket) => ticket.id.replaceAll("-", "").toUpperCase().startsWith(shortId.toUpperCase())) || null;
+  }
+
+  async handleAdminCommand(chatId, telegramUser, text) {
+    if (!this.isAdmin(telegramUser.id)) return false;
+    const reply = text.match(/^\/reply\s+#?([A-Z0-9]{8})\s+([\s\S]{1,3000})$/i);
+    const close = text.match(/^\/close\s+#?([A-Z0-9]{8})$/i);
+    if (!reply && !close) return false;
+
+    const shortId = (reply || close)[1].toUpperCase();
+    const ticket = await this.findTicketByShortId(shortId);
+    if (!ticket) {
+      await this.send(chatId, `Заявка #${shortId} не найдена.`);
+      return true;
+    }
+    if (close) {
+      if (ticket.status === "closed") {
+        await this.send(chatId, `Заявка #${shortId} уже закрыта.`);
+        return true;
+      }
+      const { error } = await this.supabase
+        .from("pb_support_tickets")
+        .update({ status: "closed", updated_at: new Date().toISOString() })
+        .eq("id", ticket.id);
+      if (error) throw error;
+      await this.send(ticket.telegram_user_id, `<b>Заявка #${shortId} закрыта.</b>\nЕсли проблема не решена — создайте новое обращение через «🛟 Поддержка».`);
+      await this.send(chatId, `Заявка #${shortId} закрыта, игрок уведомлён.`);
+      return true;
+    }
+
+    await this.send(ticket.telegram_user_id, `<b>Ответ команды по заявке #${shortId}</b>\n\n${escapeHtml(reply[2])}`);
+    await this.send(chatId, `Ответ по заявке #${shortId} отправлен игроку.`);
+    return true;
   }
 
   async startPasswordReset(chatId, telegramUser) {
@@ -214,6 +260,7 @@ export class ProjectBattleTelegramBot {
     const chatId = message.chat.id;
     const telegramUser = message.from;
     const text = message.text.trim();
+    if (await this.handleAdminCommand(chatId, telegramUser, text)) return;
     const state = this.states.get(telegramUser.id);
     if (state) {
       await this.handleState(chatId, telegramUser, text, state);
