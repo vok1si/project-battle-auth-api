@@ -81,7 +81,7 @@ export class ProjectBattleTelegramBot {
   async linkAccount(chatId, telegramUser, rawCode) {
     const code = String(rawCode || "").trim().toUpperCase();
     if (!/^[A-Z0-9]{8}$/.test(code)) {
-      await this.send(chatId, "Код должен состоять из 8 символов. Получите его в профиле лаунчера и пришлите сюда.");
+      await this.send(chatId, "Не удалось получить код привязки. Вернитесь в профиль лаунчера и нажмите «Привязать Telegram» ещё раз.");
       return;
     }
     const codeHash = crypto.createHash("sha256").update(code).digest("hex");
@@ -261,18 +261,18 @@ export class ProjectBattleTelegramBot {
     const telegramUser = message.from;
     const text = message.text.trim();
     if (await this.handleAdminCommand(chatId, telegramUser, text)) return;
+    const startPayload = text.match(/^\/start(?:\s+(.+))?$/i)?.[1];
+    if (text === "/start" || text === "/menu") return this.sendWelcome(chatId);
+    if (text === "/myid") return this.send(chatId, `Ваш Telegram ID: <code>${telegramUser.id}</code>\nСообщите его владельцу проекта, чтобы получать уведомления о заявках.`);
+    if (startPayload?.startsWith("link_")) return this.linkAccount(chatId, telegramUser, startPayload.slice(5));
     const state = this.states.get(telegramUser.id);
     if (state) {
       await this.handleState(chatId, telegramUser, text, state);
       return;
     }
-    const startPayload = text.match(/^\/start(?:\s+(.+))?$/i)?.[1];
-    if (text === "/start" || text === "/menu") return this.sendWelcome(chatId);
-    if (text === "/myid") return this.send(chatId, `Ваш Telegram ID: <code>${telegramUser.id}</code>\nСообщите его владельцу проекта, чтобы получать уведомления о заявках.`);
-    if (startPayload?.startsWith("link_")) return this.linkAccount(chatId, telegramUser, startPayload.slice(5));
     if (text === "🔗 Привязать аккаунт") {
       this.states.set(telegramUser.id, { type: "link" });
-      return this.send(chatId, "Откройте профиль в лаунчере → «Привязать Telegram», затем пришлите сюда одноразовый код.");
+      return this.send(chatId, "Откройте профиль в лаунчере и нажмите «Привязать Telegram». Лаунчер сам откроет этот бот и завершит привязку.");
     }
     if (text === "👤 Профиль") {
       const user = await this.getLinkedUser(telegramUser.id);
