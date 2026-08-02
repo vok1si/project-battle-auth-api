@@ -57,7 +57,7 @@ const minecraftTicketTtlMinutes = Number(process.env.MINECRAFT_TICKET_TTL_MINUTE
 const externalTimeoutMs = Number(process.env.EXTERNAL_TIMEOUT_MS || 25000);
 const telegramBotToken = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
 const telegramWebhookSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || "").trim();
-const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/$/, "");
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
   global: { fetch: resilientFetch }
