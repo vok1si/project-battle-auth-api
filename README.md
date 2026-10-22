@@ -240,8 +240,15 @@ TELEGRAM_WEBHOOK_SECRET=a_long_random_value
 TELEGRAM_ADMIN_CHAT_IDS=your_telegram_numeric_chat_id
 ```
 
-5. Run `sql/upgrade-0.2.0-telegram.sql` once in the Supabase SQL Editor and redeploy.
+5. Run `sql/upgrade-0.2.0-telegram.sql` once in the Supabase SQL Editor. For continuing support conversations, also run `sql/upgrade-0.2.1-support-chat.sql`, then deploy the latest code.
 
 On startup the API registers `https://your-existing-auth-service.onrender.com/telegram/webhook` automatically. Telegram will then expose the bot at `https://t.me/your_bot_username`.
 
 The launcher should call `POST /auth/telegram/link-code` with the existing account token. It returns a one-time link such as `https://t.me/your_bot_username?start=link_AB12CD34`; opening it links the player's Telegram profile without asking for their launcher password.
+
+### Support conversations
+
+- A player can submit the first message as text or attach a photo, document, video, audio, voice message, video note, or sticker. A caption is optional when a supported attachment is present.
+- Each Telegram user has one active support conversation at a time. While it is open, subsequent messages and supported attachments in the bot chat are added to that ticket and copied to the configured admin chats.
+- Admins continue to reply with `/reply TICKETID message` and close with `/close TICKETID`. Players can close their active conversation with **✅ Закрыть обращение**; after closure, they can open another using **🛟 Поддержка**.
+- Conversation text, Telegram file identifiers, and message metadata are stored in `pb_support_messages`. Media bytes remain with Telegram; the bot relays messages with Telegram's `copyMessage` API.

@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const MAX_SUPPORT_MESSAGE = 3000;
+const SUPPORT_MEDIA_TYPES = ["photo", "document", "video", "animation", "audio", "voice", "video_note", "sticker"];
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -117,20 +118,106 @@ export class ProjectBattleTelegramBot {
 
   async createTicket(chatId, telegramUser, category, message) {
     const user = await this.getLinkedUser(telegramUser.id);
+    const messageText = supportText(message) || "[Вложение без подписи]";
     const { data: ticket, error } = await this.supabase.from("pb_support_tickets").insert({
       user_id: user?.id || null,
       telegram_user_id: telegramUser.id,
       category,
-      message
+      message: messageText
     }).select("id").single();
     if (error) throw error;
     const shortId = ticket.id.slice(0, 8).toUpperCase();
-    await this.send(chatId, `Заявка <b>#${shortId}</b> принята. Ответ команды придёт сюда.`, { reply_markup: mainKeyboard() });
+    const media = getSupportMedia(message);
+    await this.saveSupportMessage(ticket.id, "user", telegramUser.id, message);
+    await this.send(chatId, `Заявка <b>#${shortId}</b> принята. Продолжайте писать сюда — сообщения и вложения попадут в это же обращение. Когда вопрос решится, нажмите «✅ Закрыть обращение».`, { reply_markup: this.activeTicketKeyboard() });
     const account = user ? `${user.nickname} (${maskEmail(user.email)})` : "не привязан";
     for (const adminChatId of this.adminChatIds) {
       await this.send(adminChatId,
-        `<b>Новая заявка #${shortId}</b>\nКатегория: ${escapeHtml(category)}\nАккаунт: ${escapeHtml(account)}\nTelegram: ${escapeHtml(telegramUser.username ? `@${telegramUser.username}` : telegramUser.id)}\n\n${escapeHtml(message)}\n\n<i>Ответить:</i> <code>/reply ${shortId} текст</code>\n<i>Закрыть:</i> <code>/close ${shortId}</code>`
+        `<b>Новая заявка #${shortId}</b>\nКатегория: ${escapeHtml(category)}\nАккаунт: ${escapeHtml(account)}\nTelegram: ${escapeHtml(telegramUser.username ? `@${telegramUser.username}` : telegramUser.id)}\n\n${media ? `Вложение: ${escapeHtml(media.type)}` : escapeHtml(messageText)}\n\n<i>Ответить:</i> <code>/reply ${shortId} текст</code>\n<i>Закрыть:</i> <code>/close ${shortId}</code>`
       );
+      if (media) await this.copySupportMessage(adminChatId, chatId, message);
+    }
+    return { ticket, shortId };
+  }
+
+  activeTicketKeyboard() {
+    return { keyboard: [[{ text: "✅ Закрыть обращение" }], [{ text: "🛟 Поддержка" }]], resize_keyboard: true };
+  }
+
+  async saveSupportMessage(ticketId, senderType, telegramUserId, message) {
+    const media = getSupportMedia(message);
+    const { error } = await this.supabase.from("pb_support_messages").insert({
+      ticket_id: ticketId,
+      sender_type: senderType,
+      telegram_user_id: telegramUserId,
+      message_text: supportText(message) || null,
+      media_type: media?.type || null,
+      telegram_file_id: media?.fileId || null,
+      telegram_file_unique_id: media?.fileUniqueId || null,
+      telegram_message_id: message.message_id
+    });
+    if (error) throw error;
+  }
+
+  async copySupportMessage(targetChatId, sourceChatId, message) {
+    return this.api("copyMessage", {
+      chat_id: targetChatId,
+      from_chat_id: sourceChatId,
+      message_id: message.message_id
+    });
+  }
+
+  async findOpenTicket(telegramUserId) {
+    const { data, error } = await this.supabase.from("pb_support_tickets")
+      .select("id, status")
+      .eq("telegram_user_id", telegramUserId)
+      .eq("status", "open")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data || null;
+  }
+
+  async findLatestTicket(telegramUserId) {
+    const { data, error } = await this.supabase.from("pb_support_tickets")
+      .select("id, status")
+      .eq("telegram_user_id", telegramUserId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data || null;
+  }
+
+  async forwardPlayerMessage(ticket, chatId, telegramUser, message) {
+    const body = supportText(message);
+    if (body.length > MAX_SUPPORT_MESSAGE) {
+      await this.send(chatId, `Сообщение должно быть не длиннее ${MAX_SUPPORT_MESSAGE} символов.`, { reply_markup: this.activeTicketKeyboard() });
+      return;
+    }
+    await this.saveSupportMessage(ticket.id, "user", telegramUser.id, message);
+    const shortId = ticket.id.slice(0, 8).toUpperCase();
+    const media = getSupportMedia(message);
+    for (const adminChatId of this.adminChatIds) {
+      await this.send(adminChatId, `<b>Сообщение по заявке #${shortId} от игрока</b>${media ? `\n\nВложение: ${escapeHtml(media.type)}` : body ? `\n\n${escapeHtml(body)}` : "\n\n[Сообщение]"}`);
+      if (media) await this.copySupportMessage(adminChatId, chatId, message);
+    }
+    await this.send(chatId, `Сообщение добавлено в обращение <b>#${shortId}</b>. Команда ответит сюда.`, { reply_markup: this.activeTicketKeyboard() });
+  }
+
+  async closeTicket(ticket, chatId, byPlayer = false) {
+    const { error } = await this.supabase.from("pb_support_tickets")
+      .update({ status: "closed", updated_at: new Date().toISOString() })
+      .eq("id", ticket.id)
+      .eq("status", "open");
+    if (error) throw error;
+    const shortId = ticket.id.slice(0, 8).toUpperCase();
+    if (byPlayer) {
+      for (const adminChatId of this.adminChatIds) await this.send(adminChatId, `Игрок закрыл обращение <b>#${shortId}</b>.`);
+      await this.send(chatId, `Обращение <b>#${shortId}</b> закрыто. Если понадобится помощь, нажмите «🛟 Поддержка».`, { reply_markup: mainKeyboard() });
+    } else {
+      await this.send(ticket.telegram_user_id, `<b>Обращение #${shortId} закрыто командой.</b>\nЕсли вопрос не решён, нажмите «🛟 Поддержка», чтобы открыть новое обращение.`, { reply_markup: mainKeyboard() });
     }
   }
 
@@ -165,17 +252,25 @@ export class ProjectBattleTelegramBot {
         await this.send(chatId, `Заявка #${shortId} уже закрыта.`);
         return true;
       }
-      const { error } = await this.supabase
-        .from("pb_support_tickets")
-        .update({ status: "closed", updated_at: new Date().toISOString() })
-        .eq("id", ticket.id);
-      if (error) throw error;
-      await this.send(ticket.telegram_user_id, `<b>Заявка #${shortId} закрыта.</b>\nЕсли проблема не решена — создайте новое обращение через «🛟 Поддержка».`);
+      await this.closeTicket(ticket, chatId);
       await this.send(chatId, `Заявка #${shortId} закрыта, игрок уведомлён.`);
       return true;
     }
 
-    await this.send(ticket.telegram_user_id, `<b>Ответ команды по заявке #${shortId}</b>\n\n${escapeHtml(reply[2])}`);
+    if (ticket.status !== "open") {
+      await this.send(chatId, `Заявка #${shortId} закрыта. Создайте новое обращение через «🛟 Поддержка», если нужна помощь.`);
+      return true;
+    }
+
+    const replyText = reply[2];
+    const { error: messageError } = await this.supabase.from("pb_support_messages").insert({
+      ticket_id: ticket.id,
+      sender_type: "admin",
+      telegram_user_id: telegramUser.id,
+      message_text: replyText
+    });
+    if (messageError) throw messageError;
+    await this.send(ticket.telegram_user_id, `<b>Ответ команды по заявке #${shortId}</b>\n\n${escapeHtml(replyText)}`, { reply_markup: this.activeTicketKeyboard() });
     await this.send(chatId, `Ответ по заявке #${shortId} отправлен игроку.`);
     return true;
   }
@@ -200,7 +295,7 @@ export class ProjectBattleTelegramBot {
     await this.send(chatId, `Код отправлен на ${escapeHtml(maskEmail(user.email))}. Пришлите его сюда. Код действует 10 минут.`);
   }
 
-  async handleState(chatId, telegramUser, text, state) {
+  async handleState(chatId, telegramUser, text, state, message) {
     if (state.type === "link") return this.linkAccount(chatId, telegramUser, text);
     if (state.type === "support-category") {
       const categories = ["Ошибка лаунчера", "Проблема с аккаунтом", "Ошибка на сервере", "Жалоба", "Другое"];
@@ -213,12 +308,14 @@ export class ProjectBattleTelegramBot {
       return;
     }
     if (state.type === "support-message") {
-      if (text.length < 5 || text.length > MAX_SUPPORT_MESSAGE) {
-        await this.send(chatId, `Сообщение должно быть от 5 до ${MAX_SUPPORT_MESSAGE} символов.`);
+      const body = supportText(message);
+      const hasMedia = Boolean(getSupportMedia(message));
+      if ((!hasMedia && body.length < 5) || body.length > MAX_SUPPORT_MESSAGE) {
+        await this.send(chatId, `Напишите минимум 5 символов или приложите фото, файл, видео или голосовое сообщение. Текст — до ${MAX_SUPPORT_MESSAGE} символов.`);
         return;
       }
       this.states.delete(telegramUser.id);
-      await this.createTicket(chatId, telegramUser, state.category, text);
+      await this.createTicket(chatId, telegramUser, state.category, message);
       return;
     }
     if (state.type === "password-code") {
@@ -256,18 +353,27 @@ export class ProjectBattleTelegramBot {
   }
 
   async handleMessage(message) {
-    if (!message?.chat || message.chat.type !== "private" || !message.from || !message.text) return;
+    if (!message?.chat || message.chat.type !== "private" || !message.from) return;
     const chatId = message.chat.id;
     const telegramUser = message.from;
-    const text = message.text.trim();
-    if (await this.handleAdminCommand(chatId, telegramUser, text)) return;
+    const text = String(message.text || message.caption || "").trim();
+    if (message.text && await this.handleAdminCommand(chatId, telegramUser, text)) return;
+    if (text === "✅ Закрыть обращение") {
+      const ticket = await this.findOpenTicket(telegramUser.id);
+      if (!ticket) return this.send(chatId, "Открытых обращений нет.", { reply_markup: mainKeyboard() });
+      return this.closeTicket(ticket, chatId, true);
+    }
     const startPayload = text.match(/^\/start(?:\s+(.+))?$/i)?.[1];
     if (text === "/start" || text === "/menu") return this.sendWelcome(chatId);
     if (text === "/myid") return this.send(chatId, `Ваш Telegram ID: <code>${telegramUser.id}</code>\nСообщите его владельцу проекта, чтобы получать уведомления о заявках.`);
     if (startPayload?.startsWith("link_")) return this.linkAccount(chatId, telegramUser, startPayload.slice(5));
     const state = this.states.get(telegramUser.id);
     if (state) {
-      await this.handleState(chatId, telegramUser, text, state);
+      if (!text && state.type !== "support-message") {
+        await this.send(chatId, "На этом шаге отправьте текстовое сообщение.");
+        return;
+      }
+      await this.handleState(chatId, telegramUser, text, state, message);
       return;
     }
     if (text === "🔗 Привязать аккаунт") {
@@ -284,14 +390,40 @@ export class ProjectBattleTelegramBot {
     if (text === "❓ FAQ") return this.send(chatId, this.faqText);
     if (text === "📜 Правила") return this.send(chatId, this.rulesText);
     if (text === "🛟 Поддержка") {
+      const existing = await this.findOpenTicket(telegramUser.id);
+      if (existing) return this.send(chatId, `У вас уже открыто обращение <b>#${existing.id.slice(0, 8).toUpperCase()}</b>. Напишите сообщение или приложите файл сюда — оно попадёт в этот диалог.`, { reply_markup: this.activeTicketKeyboard() });
       this.states.set(telegramUser.id, { type: "support-category" });
       return this.send(chatId, "Выберите категорию обращения.", { reply_markup: { keyboard: ["Ошибка лаунчера", "Проблема с аккаунтом", "Ошибка на сервере", "Жалоба", "Другое"].map((x) => [{ text: x }]), resize_keyboard: true } });
     }
     if (text === "🔐 Пароль") return this.startPasswordReset(chatId, telegramUser);
+    const openTicket = await this.findOpenTicket(telegramUser.id);
+    if (openTicket && (text || getSupportMedia(message))) {
+      await this.forwardPlayerMessage(openTicket, chatId, telegramUser, message);
+      return;
+    }
+    const latestTicket = await this.findLatestTicket(telegramUser.id);
+    if (latestTicket?.status === "closed" && (text || getSupportMedia(message))) {
+      await this.send(chatId, `Последнее обращение <b>#${latestTicket.id.slice(0, 8).toUpperCase()}</b> закрыто. Чтобы начать новое, нажмите «🛟 Поддержка».`, { reply_markup: mainKeyboard() });
+      return;
+    }
     return this.send(chatId, "Выберите действие в меню ниже.", { reply_markup: mainKeyboard() });
   }
 
   async handleUpdate(update) {
     if (update?.message) await this.handleMessage(update.message);
   }
+}
+
+function supportText(message) {
+  return String(message?.text || message?.caption || "").trim();
+}
+
+function getSupportMedia(message) {
+  for (const type of SUPPORT_MEDIA_TYPES) {
+    const value = message?.[type];
+    if (!value) continue;
+    const item = Array.isArray(value) ? value.at(-1) : value;
+    return { type, fileId: item.file_id, fileUniqueId: item.file_unique_id };
+  }
+  return null;
 }
