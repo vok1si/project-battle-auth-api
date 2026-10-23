@@ -58,6 +58,14 @@ const externalTimeoutMs = Number(process.env.EXTERNAL_TIMEOUT_MS || 25000);
 const telegramBotToken = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
 const telegramWebhookSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || "").trim();
 const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/$/, "");
+const exarotonServerId = String(process.env.EXAROTON_SERVER_ID || "").trim();
+const exarotonApiToken = String(process.env.EXAROTON_API_TOKEN || "").trim();
+const exarotonStatuses = [
+  "OFFLINE", "ONLINE", "STARTING", "STOPPING", "RESTARTING",
+  "SAVING", "LOADING", "CRASHED", "PENDING", "TRANSFERRING", "PREPARING"
+];
+let serverStatusCache = null;
+let serverStatusRequest = null;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
   global: { fetch: resilientFetch }
@@ -288,6 +296,52 @@ app.get("/health", (_req, res) => {
     revision: "2026-08-01-fetch-retry",
     telegramBot: Boolean(telegramBot)
   });
+});
+
+async function fetchServerStatus() {
+  const response = await nativeFetch(
+    `https://api.exaroton.com/v1/servers/${encodeURIComponent(exarotonServerId)}`,
+    {
+      headers: { Authorization: `Bearer ${exarotonApiToken}` },
+      signal: AbortSignal.timeout(8000)
+    }
+  );
+  if (!response.ok) throw new Error(`exaroton returned HTTP ${response.status}`);
+  const body = await response.json();
+  if (!body?.success || !body?.data) throw new Error("exaroton status response is invalid");
+
+  const server = body.data;
+  const statusCode = Number(server.status);
+  return {
+    ok: true,
+    status: exarotonStatuses[statusCode] || "UNKNOWN",
+    statusCode,
+    address: server.address || null,
+    port: Number.isInteger(server.port) ? server.port : null,
+    players: {
+      count: Number.isInteger(server.players?.count) ? server.players.count : null,
+      max: Number.isInteger(server.players?.max) ? server.players.max : null
+    },
+    checkedAt: new Date().toISOString()
+  };
+}
+
+app.get("/server/status", async (_req, res) => {
+  if (!exarotonServerId || !exarotonApiToken) {
+    sendError(res, 503, "SERVER_STATUS_NOT_CONFIGURED", "Server status is not configured");
+    return;
+  }
+
+  try {
+    if (!serverStatusCache || Date.now() >= serverStatusCache.expiresAt) {
+      serverStatusRequest ||= fetchServerStatus().finally(() => { serverStatusRequest = null; });
+      const value = await serverStatusRequest;
+      serverStatusCache = { value, expiresAt: Date.now() + 15000 };
+    }
+    res.set("Cache-Control", "public, max-age=10").json(serverStatusCache.value);
+  } catch (_error) {
+    sendError(res, 502, "SERVER_STATUS_UNAVAILABLE", "Server status is temporarily unavailable");
+  }
 });
 
 app.post("/auth/telegram/link-code", async (req, res, next) => {

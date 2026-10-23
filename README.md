@@ -111,6 +111,20 @@ That URL is what the launcher and Minecraft auth mod will use.
 
 ## 5. API Endpoints
 
+### Project Battle server status
+
+Set `EXAROTON_SERVER_ID` and `EXAROTON_API_TOKEN` in the backend environment.
+The token must stay on the backend and must never be included in the launcher.
+
+```http
+GET /server/status
+```
+
+The response contains the exaroton state, current address and port, player
+count and check time. Responses are cached for 15 seconds. This endpoint can
+only read status; it cannot start or stop the server. Without the two
+environment variables it returns `503`.
+
 ### Start Registration
 
 ```http
