@@ -111,6 +111,20 @@ That URL is what the launcher and Minecraft auth mod will use.
 
 ## 5. API Endpoints
 
+### Project Battle server status
+
+Set `EXAROTON_SERVER_ID` and `EXAROTON_API_TOKEN` in the backend environment.
+The token must stay on the backend and must never be included in the launcher.
+
+```http
+GET /server/status
+```
+
+The response contains the exaroton state, current address and port, player
+count and check time. Responses are cached for 15 seconds. This endpoint can
+only read status; it cannot start or stop the server. Without the two
+environment variables it returns `503`.
+
 ### Start Registration
 
 ```http
@@ -245,6 +259,8 @@ TELEGRAM_ADMIN_CHAT_IDS=your_telegram_numeric_chat_id
 On startup the API registers `https://your-existing-auth-service.onrender.com/telegram/webhook` automatically. Telegram will then expose the bot at `https://t.me/your_bot_username`.
 
 The launcher should call `POST /auth/telegram/link-code` with the existing account token. It returns a one-time link such as `https://t.me/your_bot_username?start=link_AB12CD34`; opening it links the player's Telegram profile without asking for their launcher password.
+
+`POST /auth/telegram/unlink` requires the current account Bearer token and JSON body `{ "password": "..." }`. It verifies the account password, limits failed attempts, removes pending link codes, and unlinks the Telegram account. The launcher can then request a new one-time link for relinking.
 
 ### Support conversations
 
