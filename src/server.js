@@ -66,6 +66,7 @@ const exarotonStatuses = [
 ];
 let serverStatusCache = null;
 let serverStatusRequest = null;
+const telegramUnlinkFailures = new Map();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
   global: { fetch: resilientFetch }
@@ -367,6 +368,38 @@ app.post("/auth/telegram/link-code", async (req, res, next) => {
     const identity = await telegramBot.api("getMe", {});
     const link = identity?.username ? `https://t.me/${identity.username}?start=link_${code}` : null;
     res.json({ ok: true, code, expiresAt, link });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/auth/telegram/unlink", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req);
+    if (!user?.password_hash) {
+      sendError(res, 401, "INVALID_TOKEN", "Valid Project Battle account required");
+      return;
+    }
+    const now = Date.now();
+    const failures = telegramUnlinkFailures.get(user.id);
+    if (failures && failures.until > now && failures.count >= 5) {
+      sendError(res, 429, "TOO_MANY_ATTEMPTS", "Try again in 15 minutes");
+      return;
+    }
+    if (!await bcrypt.compare(String(req.body.password || ""), user.password_hash)) {
+      const count = failures?.until > now ? failures.count + 1 : 1;
+      telegramUnlinkFailures.set(user.id, { count, until: now + 15 * 60 * 1000 });
+      sendError(res, 403, "INVALID_PASSWORD", "Account password is incorrect");
+      return;
+    }
+    telegramUnlinkFailures.delete(user.id);
+    const { error: codeError } = await withTimeout(supabase.from("pb_telegram_link_codes")
+      .delete().eq("user_id", user.id).is("used_at", null), "Database Telegram pending code cleanup");
+    if (codeError) throw codeError;
+    const { error: linkError } = await withTimeout(supabase.from("pb_telegram_links")
+      .delete().eq("user_id", user.id), "Database Telegram unlink");
+    if (linkError) throw linkError;
+    res.json({ ok: true, telegramLinked: false });
   } catch (error) {
     next(error);
   }

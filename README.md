@@ -260,6 +260,8 @@ On startup the API registers `https://your-existing-auth-service.onrender.com/te
 
 The launcher should call `POST /auth/telegram/link-code` with the existing account token. It returns a one-time link such as `https://t.me/your_bot_username?start=link_AB12CD34`; opening it links the player's Telegram profile without asking for their launcher password.
 
+`POST /auth/telegram/unlink` requires the current account Bearer token and JSON body `{ "password": "..." }`. It verifies the account password, limits failed attempts, removes pending link codes, and unlinks the Telegram account. The launcher can then request a new one-time link for relinking.
+
 ### Support conversations
 
 - A player can submit the first message as text or attach a photo, document, video, audio, voice message, video note, or sticker. A caption is optional when a supported attachment is present.
